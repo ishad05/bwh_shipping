@@ -2,6 +2,7 @@
 # For license information, please see license.txt
 
 import json
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import frappe
@@ -177,6 +178,22 @@ class TestPartnerHandover(IntegrationTestCase):
 
 	def test_nothing_reported_records_nothing(self):
 		self.assertFalse(frappe.new_doc("Shipping Request").record_handover(None))
+
+	def test_delivery_note_lines_reach_the_provider(self):
+		"""Shipping Parcel rows drop line detail, so the payload reads it back from the Delivery Note."""
+		request = frappe.new_doc("Shipping Request")
+		request.delivery_note = "_Test DN"
+		request.append("parcels", {"length": 30, "width": 20, "height": 10, "weight": 0.4, "count": 1})
+		delivery_note = SimpleNamespace(
+			items=[SimpleNamespace(item_name="Tee", item_code="PF-TEE", qty=2, rate=25)]
+		)
+
+		with patch.object(frappe, "get_cached_doc", return_value=delivery_note):
+			parcels = request.get_parcels_with_items()
+
+		self.assertEqual(
+			parcels[0]["items"], [{"description": "Tee", "sku": "PF-TEE", "quantity": 2, "rate": 25.0}]
+		)
 
 
 class TestStateCode(IntegrationTestCase):

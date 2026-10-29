@@ -10,6 +10,7 @@ from frappe.utils.data import cint, flt, get_datetime, today
 
 from bwh_shipping.bwh_shipping.utils import get_address_payload
 from bwh_shipping.exceptions import PartialBookingError
+from bwh_shipping.fulfilment import build_items
 from bwh_shipping.status import can_advance, is_terminal, validate_status
 from bwh_shipping.units import DEFAULT_VOLUMETRIC_DIVISOR, billable_weight, normalise_parcels
 
@@ -57,6 +58,16 @@ class ShippingRequest(Document):
 	def get_parcels(self) -> list[dict]:
 		return normalise_parcels([parcel.as_dict() for parcel in self.parcels])
 
+	def get_parcels_with_items(self) -> list[dict]:
+		"""A Shipping Parcel row holds no line detail, so the Delivery Note's lines go on the first parcel.
+
+		Shiprocket needs them for its order lines, and a fulfilment partner prints from them.
+		"""
+		parcels = self.get_parcels()
+		if self.delivery_note:
+			parcels[0]["items"] = build_items(frappe.get_cached_doc("Delivery Note", self.delivery_note))
+		return parcels
+
 	def get_shipment_payload(self) -> dict:
 		return {
 			"reference": self.name,
@@ -64,7 +75,7 @@ class ShippingRequest(Document):
 			"service_code": self.service_code,
 			"origin": get_address_payload(self.origin_address),
 			"destination": get_address_payload(self.destination_address, self.customer_name),
-			"parcels": self.get_parcels(),
+			"parcels": self.get_parcels_with_items(),
 			"declared_value": flt(self.declared_value),
 			"currency": self.currency,
 			"cod": bool(self.cod),
