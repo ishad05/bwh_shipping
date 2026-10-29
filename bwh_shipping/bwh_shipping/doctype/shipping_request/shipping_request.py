@@ -99,6 +99,12 @@ class ShippingRequest(Document):
 				_("This shipment is already booked with AWB {0}").format(frappe.bold(self.awb)),
 				title=_("Already Booked"),
 			)
+		if self.status != "Draft":
+			# A fulfilment partner books now and ships later, so a booked shipment can still have no AWB.
+			frappe.throw(
+				_("A shipment in status {0} cannot be booked again").format(frappe.bold(_(self.status))),
+				title=_("Already Booked"),
+			)
 		if not self.service_code:
 			frappe.throw(_("Select a shipping service before booking"))
 
@@ -197,7 +203,7 @@ class ShippingRequest(Document):
 	@frappe.whitelist()
 	def sync_status(self) -> str:
 		"""Re-read the authoritative status from the provider. Never trust a stale local state."""
-		if not self.awb:
+		if not (self.awb or self.tracking_ref):
 			frappe.throw(_("This shipment has no AWB yet, so there is nothing to track"))
 
 		tracking = self.get_controller().get_tracking(
@@ -211,6 +217,7 @@ class ShippingRequest(Document):
 			(tracking or {}).get("status"),
 			provider_status=(tracking or {}).get("provider_status"),
 			events=(tracking or {}).get("events"),
+			handover=tracking,
 		)
 		return self.status
 
@@ -250,6 +257,7 @@ class ShippingRequest(Document):
 		event_id: str | None = None,
 		events: list | None = None,
 		provider_status: str | None = None,
+		handover: dict | None = None,
 	) -> bool:
 		"""Apply a verified provider status. Return False when the event is a replay or not applicable."""
 		self.lock_booking()
@@ -262,7 +270,9 @@ class ShippingRequest(Document):
 		# Letting it would point the replay guard at an event that never took effect, and on a shipment
 		# still in flight that loses the guard for the event that did. Re-examining a rejected delivery on
 		# each retry is cheap: it fails the ladder check immediately.
-		return self.apply_status(status, provider_status=provider_status, events=events, event_id=event_id)
+		return self.apply_status(
+			status, provider_status=provider_status, events=events, event_id=event_id, handover=handover
+		)
 
 	def apply_status(
 		self,
@@ -270,12 +280,14 @@ class ShippingRequest(Document):
 		provider_status: str | None = None,
 		events: list | None = None,
 		event_id: str | None = None,
+		handover: dict | None = None,
 	) -> bool:
 		"""Move the shipment along the ladder, recording scans either way.
 
 		Returns whether `status` was actually applied: a carrier that reports a scan out of order, or a
 		provider replaying history, must never un-deliver a delivered shipment.
 		"""
+		recorded = self.record_handover(handover)
 		appended = self.append_tracking_events(events)
 		advanced = bool(status) and can_advance(self.status, status)
 
@@ -300,9 +312,22 @@ class ShippingRequest(Document):
 			if event_id:
 				self.last_webhook_event_id = event_id
 
-		if advanced or appended or describes_current_state:
+		if advanced or appended or recorded or describes_current_state:
 			self.save(ignore_permissions=True)
 		return advanced
+
+	def record_handover(self, details: dict | None) -> bool:
+		"""Fill in the AWB, carrier and tracking link a fulfilment partner reports once it ships.
+
+		Only blanks are filled: a booked AWB is the handle every later call and webhook matches on.
+		"""
+		recorded = False
+		for field in ("awb", "carrier", "tracking_url"):
+			value = (details or {}).get(field)
+			if value and not self.get(field):
+				self.set(field, value)
+				recorded = True
+		return recorded
 
 	def append_tracking_events(self, events: list | None) -> bool:
 		"""Add scans we have not already recorded. Returns whether anything was added."""
